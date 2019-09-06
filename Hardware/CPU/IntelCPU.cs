@@ -39,6 +39,7 @@ namespace OpenHardwareMonitor.Hardware.CPU {
     private readonly Sensor busClock;
     private readonly Sensor[] powerSensors;
     private readonly Sensor[] distToTjMaxTemperatures;
+    private readonly Sensor tccOffsetSensor;
     private readonly Sensor coreMax;
     private readonly Sensor coreAvg;
 
@@ -84,6 +85,27 @@ namespace OpenHardwareMonitor.Hardware.CPU {
         }
       }
       return result;
+    }
+
+    private int GetAndAdjustTccOffsetFromMSR() {
+      uint eax, edx;
+
+      if (Ring0.RdmsrTx(IA32_TEMPERATURE_TARGET, out eax,
+          out edx, 1UL << cpuid[0][0].Thread)) {
+        int offset = (int)eax >> 24 & 0x3F;
+
+        if (offset > 10) {
+          // setting offset to 96C, i.e. 4 degrees below 100
+          uint tjMax = eax >> 16 & 0xFF;
+          uint eaxNew = 0x04 << 24 | tjMax << 16 | eax & 0xFFFF;
+          if (!Ring0.Wrmsr(IA32_TEMPERATURE_TARGET, eaxNew, edx)) {
+            // update failed, show a negative value so that we know update failed
+            offset = -offset;
+          }
+        }
+        return offset;
+      }
+      return -1;
     }
 
     public IntelCPU(int processorIndex, CPUID[][] cpuid, ISettings settings)
@@ -303,6 +325,8 @@ namespace OpenHardwareMonitor.Hardware.CPU {
           ActivateSensor(distToTjMaxTemperatures[i]);
           coreSensorId++;
         }
+        tccOffsetSensor = new Sensor("CPU TCC Offset", coreSensorId++, SensorType.Temperature, this, settings);
+        ActivateSensor(tccOffsetSensor);
       }
       else
       {
@@ -458,6 +482,10 @@ namespace OpenHardwareMonitor.Hardware.CPU {
         } else {
           packageTemperature.Value = null;
         }
+      }
+
+      if (tccOffsetSensor != null) {
+        tccOffsetSensor.Value = GetAndAdjustTccOffsetFromMSR();
       }
 
       if (HasTimeStampCounter && timeStampCounterMultiplier > 0) {
